@@ -1,0 +1,1656 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="description" content="Чумная Крыса — pixel-art аркада: чихай и заражай горожан чумой, уворачивайся от чумных докторов и проходи ворота в средневековых улицах.">
+<title>Чумная Крыса — pixel-art игра</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse 90% 70% at 50% 40%, #171210 0%, #0b0808 55%, #060404 100%);
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 0 3px #241a16, 0 0 0 6px #0d0a08, 0 0 60px rgba(226, 98, 42, 0.12);
+    touch-action: none;
+    outline: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="320" height="480" tabindex="0"
+  aria-label="Игра Чумная Крыса: заражай горожан чиханием, уворачивайся от огня чумных докторов и проходи ворота в стенах"></canvas>
+<script>
+// src/game/audio.ts
+class SoundBox {
+  ctx = null;
+  master = null;
+  noiseBuf = null;
+  musicGain = null;
+  sfxGain = null;
+  musicTimer = null;
+  nextNoteT = 0;
+  step = 0;
+  muted = false;
+  ensure() {
+    if (this.ctx) {
+      if (this.ctx.state === "suspended")
+        this.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext ?? window.webkitAudioContext;
+    if (!AC)
+      return;
+    this.ctx = new AC;
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.muted ? 0 : 0.55;
+    this.master.connect(this.ctx.destination);
+    this.sfxGain = this.ctx.createGain();
+    this.sfxGain.gain.value = 0.9;
+    this.sfxGain.connect(this.master);
+    this.musicGain = this.ctx.createGain();
+    this.musicGain.gain.value = 0.16;
+    this.musicGain.connect(this.master);
+    const len = this.ctx.sampleRate;
+    this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = this.noiseBuf.getChannelData(0);
+    for (let i = 0;i < len; i++)
+      data[i] = Math.random() * 2 - 1;
+  }
+  setMuted(m) {
+    this.muted = m;
+    if (this.master && this.ctx) {
+      this.master.gain.setTargetAtTime(m ? 0 : 0.55, this.ctx.currentTime, 0.02);
+    }
+    try {
+      localStorage.setItem("plague_rat_mute", m ? "1" : "0");
+    } catch {}
+  }
+  osc(type, f0, f1, t0, dur, vol, dest) {
+    if (!this.ctx || !this.sfxGain)
+      return;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t0);
+    o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + dur);
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g);
+    g.connect(dest ?? this.sfxGain);
+    o.start(t0);
+    o.stop(t0 + dur + 0.02);
+  }
+  noise(t0, dur, vol, type, f0, f1) {
+    if (!this.ctx || !this.sfxGain || !this.noiseBuf)
+      return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const flt = this.ctx.createBiquadFilter();
+    flt.type = type;
+    flt.frequency.setValueAtTime(f0, t0);
+    flt.frequency.exponentialRampToValueAtTime(Math.max(10, f1), t0 + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    src.connect(flt);
+    flt.connect(g);
+    g.connect(this.sfxGain);
+    src.start(t0);
+    src.stop(t0 + dur + 0.02);
+  }
+  t() {
+    return this.ctx ? this.ctx.currentTime : 0;
+  }
+  sneeze() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    this.osc("sawtooth", 320, 760, t0, 0.1, 0.16);
+    this.osc("sawtooth", 500, 1150, t0 + 0.05, 0.1, 0.12);
+    this.noise(t0 + 0.1, 0.22, 0.5, "highpass", 900, 2600);
+    this.noise(t0 + 0.1, 0.18, 0.3, "bandpass", 700, 300);
+  }
+  infect(combo) {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    const base = 620 * Math.pow(1.06, Math.min(combo, 12));
+    this.osc("square", base, base * 1.6, t0, 0.09, 0.1);
+    this.osc("square", base * 1.5, base * 2, t0 + 0.05, 0.07, 0.06);
+  }
+  spread() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    this.osc("triangle", 340, 520, t0, 0.08, 0.08);
+  }
+  warn() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    this.osc("square", 1150, 1150, t0, 0.07, 0.07);
+    this.osc("square", 1150, 1150, t0 + 0.12, 0.07, 0.07);
+  }
+  fire() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    this.noise(t0, 0.35, 0.4, "bandpass", 400, 1800);
+    this.osc("sawtooth", 180, 60, t0, 0.3, 0.1);
+  }
+  death() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    this.osc("sawtooth", 240, 50, t0, 0.7, 0.2);
+    this.osc("square", 120, 30, t0 + 0.05, 0.7, 0.12);
+    this.noise(t0, 0.4, 0.4, "lowpass", 900, 120);
+  }
+  milestone() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    const t0 = this.t();
+    const notes = [440, 554, 659, 880];
+    notes.forEach((f, i) => this.osc("square", f, f, t0 + i * 0.09, 0.14, 0.08));
+  }
+  click() {
+    this.ensure();
+    if (!this.ctx)
+      return;
+    this.osc("square", 900, 500, this.t(), 0.05, 0.06);
+  }
+  startMusic() {
+    this.ensure();
+    if (!this.ctx || this.musicTimer !== null)
+      return;
+    this.nextNoteT = this.ctx.currentTime + 0.1;
+    this.step = 0;
+    const bpm = 92;
+    const stepDur = 60 / bpm / 2;
+    const bass = [55, 0, 55, 0, 82.4, 0, 65.4, 0, 55, 0, 55, 0, 49, 0, 58.3, 0];
+    const leadScale = [220, 261.6, 293.7, 329.6, 392, 440, 523.3];
+    this.musicTimer = window.setInterval(() => {
+      if (!this.ctx || !this.musicGain)
+        return;
+      while (this.nextNoteT < this.ctx.currentTime + 0.25) {
+        const s = this.step % 16;
+        const t0 = this.nextNoteT;
+        const bf = bass[s];
+        if (bf > 0) {
+          this.osc("triangle", bf, bf, t0, stepDur * 1.8, 0.5, this.musicGain);
+        }
+        if (s % 2 === 0 && Math.random() < 0.3) {
+          const f = leadScale[Math.floor(Math.random() * leadScale.length)];
+          this.osc("square", f, f, t0, stepDur * 1.4, 0.12, this.musicGain);
+        }
+        if (s === 0 || s === 8) {
+          this.noise(t0, 0.05, 0.12, "lowpass", 300, 80);
+        }
+        this.nextNoteT += stepDur;
+        this.step++;
+      }
+    }, 60);
+  }
+  stopMusic() {
+    if (this.musicTimer !== null) {
+      clearInterval(this.musicTimer);
+      this.musicTimer = null;
+    }
+  }
+}
+
+// src/game/font.ts
+var GLYPH_W = 5;
+var GLYPH_H = 7;
+var ADVANCE = 6;
+var G = {
+  " ": [0, 0, 0, 0, 0, 0, 0],
+  А: [14, 17, 17, 31, 17, 17, 17],
+  Б: [31, 16, 16, 30, 17, 17, 30],
+  В: [30, 17, 17, 30, 17, 17, 30],
+  Г: [31, 16, 16, 16, 16, 16, 16],
+  Д: [4, 14, 17, 17, 17, 31, 17],
+  Е: [31, 16, 16, 30, 16, 16, 31],
+  Ё: [10, 31, 16, 30, 16, 16, 31],
+  Ж: [21, 21, 21, 31, 21, 21, 21],
+  З: [14, 17, 1, 6, 1, 17, 14],
+  И: [17, 17, 19, 21, 25, 17, 17],
+  Й: [10, 17, 19, 21, 25, 17, 17],
+  К: [17, 18, 20, 24, 20, 18, 17],
+  Л: [3, 5, 9, 17, 17, 17, 17],
+  М: [17, 27, 21, 21, 17, 17, 17],
+  Н: [17, 17, 17, 31, 17, 17, 17],
+  О: [14, 17, 17, 17, 17, 17, 14],
+  П: [31, 17, 17, 17, 17, 17, 17],
+  Р: [30, 17, 17, 30, 16, 16, 16],
+  С: [14, 17, 16, 16, 16, 17, 14],
+  Т: [31, 4, 4, 4, 4, 4, 4],
+  У: [17, 17, 10, 4, 4, 4, 4],
+  Ф: [4, 14, 21, 21, 14, 4, 4],
+  Х: [17, 17, 10, 4, 10, 17, 17],
+  Ц: [18, 18, 18, 18, 18, 30, 2],
+  Ч: [17, 17, 17, 31, 1, 1, 1],
+  Ш: [21, 21, 21, 21, 21, 21, 31],
+  Щ: [21, 21, 21, 21, 21, 31, 1],
+  Ъ: [30, 17, 17, 30, 16, 16, 16],
+  Ы: [17, 17, 17, 29, 21, 21, 29],
+  Ь: [16, 16, 16, 30, 17, 17, 30],
+  Э: [14, 17, 1, 14, 1, 17, 14],
+  Ю: [23, 21, 21, 27, 21, 21, 23],
+  Я: [15, 17, 17, 15, 17, 17, 17],
+  "0": [14, 17, 19, 21, 25, 17, 14],
+  "1": [4, 12, 4, 4, 4, 4, 14],
+  "2": [14, 17, 1, 2, 4, 8, 31],
+  "3": [30, 1, 1, 14, 1, 1, 30],
+  "4": [2, 6, 10, 18, 31, 2, 2],
+  "5": [31, 16, 30, 1, 1, 17, 14],
+  "6": [6, 8, 16, 30, 17, 17, 14],
+  "7": [31, 1, 2, 4, 8, 8, 8],
+  "8": [14, 17, 17, 14, 17, 17, 14],
+  "9": [14, 17, 17, 15, 1, 2, 12],
+  ".": [0, 0, 0, 0, 0, 12, 12],
+  ",": [0, 0, 0, 0, 12, 4, 8],
+  "!": [4, 4, 4, 4, 4, 0, 4],
+  "?": [14, 17, 1, 6, 4, 0, 4],
+  ":": [0, 12, 12, 0, 12, 12, 0],
+  "-": [0, 0, 0, 14, 0, 0, 0],
+  "+": [0, 4, 4, 31, 4, 4, 0],
+  "/": [1, 1, 2, 4, 8, 16, 16],
+  "(": [2, 4, 8, 8, 8, 4, 2],
+  ")": [8, 4, 2, 2, 2, 4, 8],
+  "«": [2, 4, 8, 8, 4, 2, 0],
+  "»": [8, 4, 2, 2, 4, 8, 0],
+  "'": [4, 4, 8, 0, 0, 0, 0],
+  "←": [0, 4, 8, 31, 8, 4, 0],
+  "→": [0, 4, 2, 31, 2, 4, 0],
+  "↑": [4, 14, 21, 4, 4, 4, 4],
+  "↓": [4, 4, 4, 4, 21, 14, 4],
+  M: [17, 27, 21, 21, 17, 17, 17],
+  P: [30, 17, 17, 30, 16, 16, 16],
+  E: [31, 16, 16, 30, 16, 16, 31],
+  S: [14, 17, 16, 14, 1, 17, 14],
+  C: [14, 17, 16, 16, 16, 17, 14]
+};
+function textW(text, scale = 1) {
+  return text.length * ADVANCE * scale - scale;
+}
+function drawText(ctx, text, x, y, color, scale = 1, align = "left") {
+  const s = text.toUpperCase();
+  let ox = x;
+  if (align === "center")
+    ox = x - textW(s, scale) / 2;
+  else if (align === "right")
+    ox = x - textW(s, scale);
+  ctx.fillStyle = color;
+  for (let i = 0;i < s.length; i++) {
+    const g = G[s[i]] ?? G["?"];
+    for (let r = 0;r < GLYPH_H; r++) {
+      const bits = g[r];
+      if (!bits)
+        continue;
+      for (let c = 0;c < GLYPH_W; c++) {
+        if (bits & 1 << 4 - c) {
+          ctx.fillRect(ox + i * ADVANCE * scale + c * scale, y + r * scale, scale, scale);
+        }
+      }
+    }
+  }
+}
+function drawTextO(ctx, text, x, y, color, scale = 1, align = "left", outline = "#0c0806") {
+  const offs = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1]
+  ];
+  for (const [dx, dy] of offs) {
+    drawText(ctx, text, x + dx * scale, y + dy * scale, outline, scale, align);
+  }
+  drawText(ctx, text, x, y, color, scale, align);
+}
+
+// src/game/render.ts
+var lights = [];
+var SNEEZE_RANGE_R = 48;
+var SNEEZE_SLOPE_R = 0.85;
+function renderGame(g) {
+  const ctx = g.ctx;
+  ctx.imageSmoothingEnabled = false;
+  lights = [];
+  const cur = g.phase === "play" ? "none" : "default";
+  if (g.canvas.style.cursor !== cur)
+    g.canvas.style.cursor = cur;
+  ctx.save();
+  if (g.shakeT > 0) {
+    const s = g.shakeT * 8;
+    ctx.translate(Math.round((Math.random() * 2 - 1) * s), Math.round((Math.random() * 2 - 1) * s));
+  }
+  ctx.save();
+  ctx.scale(2, 2);
+  drawWorld(g);
+  if (g.phase === "menu")
+    dim(g, "rgba(6,4,9,0.48)");
+  if (g.phase === "dead")
+    dim(g, "rgba(30,6,6,0.55)");
+  if (g.phase === "pause")
+    dim(g, "rgba(4,4,8,0.5)");
+  drawDarkness(g);
+  drawWarmGlow(g);
+  drawTopAndVignette(g);
+  for (const f of g.floats) {
+    const a = Math.max(0, 1 - f.t / f.life);
+    ctx.globalAlpha = a;
+    drawTextO(ctx, f.text, f.x, f.y, f.color, f.scale, "center");
+    ctx.globalAlpha = 1;
+  }
+  if (g.phase === "play" || g.phase === "pause")
+    drawHUD(g);
+  ctx.restore();
+  ctx.restore();
+  if (g.phase === "menu")
+    drawMenu(g);
+  if (g.phase === "dead")
+    drawDead(g);
+  if (g.phase === "pause")
+    drawPause(g);
+}
+function dim(g, color) {
+  g.ctx.fillStyle = color;
+  g.ctx.fillRect(0, 0, W, H);
+}
+function drawWorld(g) {
+  const ctx = g.ctx;
+  const off = (g.scroll % 64 + 64) % 64;
+  for (let y = -64 + off;y < H; y += 64) {
+    for (let x = 0;x < W; x += 64)
+      ctx.drawImage(g.cobble, x, Math.round(y));
+  }
+  const offB = (g.scroll % 48 + 48) % 48;
+  for (let y = -48 + offB;y < H; y += 48) {
+    const yy = Math.round(y);
+    ctx.drawImage(g.sideBrick, 0, yy);
+    ctx.drawImage(g.sideBrick, W - 16, yy);
+  }
+  ctx.fillStyle = "#0e0a0c";
+  ctx.fillRect(16, 0, 2, H);
+  ctx.fillRect(W - 18, 0, 2, H);
+  ctx.fillStyle = "#2a2023";
+  ctx.fillRect(STREET_L - 1, 0, 1, H);
+  ctx.fillRect(STREET_R, 0, 1, H);
+  for (const d of g.decos) {
+    const x = d.x - 3;
+    ctx.fillStyle = "#0c0908";
+    ctx.fillRect(x, Math.round(d.y), 6, 9);
+    if (d.lit) {
+      ctx.fillStyle = "#ffb85c";
+      ctx.fillRect(x + 1, Math.round(d.y) + 1, 4, 7);
+      ctx.fillStyle = "#7a4a1a";
+      ctx.fillRect(x + 2, Math.round(d.y) + 1, 1, 7);
+      ctx.fillRect(x + 1, Math.round(d.y) + 3, 4, 1);
+      lights.push({ x: d.x, y: d.y + 4, r: 12, ph: d.x, a: 0.8, warm: true });
+    } else {
+      ctx.fillStyle = "#1a1416";
+      ctx.fillRect(x + 1, Math.round(d.y) + 1, 4, 7);
+    }
+  }
+  for (const t of g.torches) {
+    const x = Math.round(t.x);
+    const y = Math.round(t.y);
+    ctx.fillStyle = "#4a3524";
+    ctx.fillRect(x - 1, y - 8, 2, 8);
+    ctx.fillStyle = "#33241a";
+    ctx.fillRect(x, y - 8, 1, 8);
+    drawFlame(ctx, x, y - 9, g.gt, t.ph);
+    lights.push({ x, y: y - 11, r: 22, ph: t.ph, warm: true });
+  }
+  for (const wl of g.walls)
+    drawBarricade(g, wl);
+  for (const p of g.people) {
+    const spr = g.variants[p.variant][p.infected ? "sick" : "normal"][p.frame];
+    const px = Math.round(p.x - 6.5);
+    const py = Math.round(p.y - 14);
+    if (p.infected) {
+      ctx.fillStyle = "rgba(140,220,90,0.13)";
+      ctx.beginPath();
+      ctx.arc(px + 6, py + 7, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.drawImage(spr, px, py);
+  }
+  for (const d of g.doctors) {
+    const charging = d.chargeT > 0;
+    const px = Math.round(d.x - 6.5);
+    const py = Math.round(d.y - 16);
+    ctx.drawImage(charging ? g.docCharge : g.docNormal, px, py);
+    if (charging) {
+      const x0 = d.x;
+      const y0 = d.y - 6;
+      const x1 = g.ratX;
+      const y1 = RAT_Y;
+      const n = Math.floor(Math.hypot(x1 - x0, y1 - y0) / 5);
+      for (let i = 1;i < n; i++) {
+        const k = i / n;
+        const a = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(g.gt * 18 - i));
+        ctx.fillStyle = `rgba(255,64,52,${a})`;
+        ctx.fillRect(Math.round(x0 + (x1 - x0) * k), Math.round(y0 + (y1 - y0) * k), 1, 1);
+      }
+      const bob = Math.sin(g.gt * 10) > 0 ? 0 : -1;
+      drawTextO(ctx, "!", d.x, d.y - 30 + bob, "#ffd75e", 1, "center");
+      lights.push({ x: d.x, y: d.y - 12, r: 7, ph: 1, a: 0.7, warm: false });
+    }
+  }
+  for (const f of g.fireballs) {
+    const x = Math.round(f.x);
+    const y = Math.round(f.y);
+    const j = Math.sin(f.t * 40) > 0 ? 1 : 0;
+    ctx.fillStyle = "#e2622a";
+    ctx.fillRect(x - 3, y - 2, 6, 4);
+    ctx.fillRect(x - 2, y - 3, 4, 6);
+    ctx.fillStyle = "#ff9c3a";
+    ctx.fillRect(x - 2, y - 1, 4, 2);
+    ctx.fillRect(x - 1, y - 2, 2, 4);
+    ctx.fillStyle = "#ffe98a";
+    ctx.fillRect(x - 1 + j, y - 1, 1, 2);
+    lights.push({ x, y, r: 15, ph: f.t * 9, a: 0.9, warm: true });
+  }
+  if (g.sneezeAnim > 0 && g.ratVisible) {
+    const a = g.sneezeAnim / 0.32 * 0.25;
+    ctx.fillStyle = `rgba(170,255,120,${a})`;
+    ctx.beginPath();
+    ctx.moveTo(g.ratX - 7, RAT_Y - 8);
+    ctx.lineTo(g.ratX - SNEEZE_RANGE_R * SNEEZE_SLOPE_R, RAT_Y - 8 - SNEEZE_RANGE_R);
+    ctx.lineTo(g.ratX + SNEEZE_RANGE_R * SNEEZE_SLOPE_R, RAT_Y - 8 - SNEEZE_RANGE_R);
+    ctx.closePath();
+    ctx.fill();
+  }
+  if (g.ratVisible) {
+    for (let i = 0;i < 7; i++) {
+      const tx = g.ratX + Math.sin(g.gt * 5 + i * 0.9) * i * 0.9;
+      const ty = RAT_Y + 3 + i * 1.8;
+      ctx.fillStyle = i < 2 ? "#a05f66" : "#8a4f57";
+      ctx.fillRect(Math.round(tx) - 1, Math.round(ty), 2, 2);
+    }
+    if (g.sneezeAnim > 0.2) {
+      ctx.drawImage(g.rat, Math.round(g.ratX - 6.5), RAT_Y - 8, 13, 14);
+    } else {
+      ctx.drawImage(g.rat, Math.round(g.ratX - 7.5), RAT_Y - 6);
+    }
+    lights.push({ x: g.ratX, y: RAT_Y, r: 13, ph: 3, a: 0.5, warm: false });
+  }
+  for (const p of g.particles) {
+    const a = Math.max(0, 1 - p.t / p.life);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(Math.round(p.x), Math.round(p.y), Math.ceil(p.size), Math.ceil(p.size));
+  }
+  ctx.globalAlpha = 1;
+}
+function drawFlame(ctx, x, y, gt, ph) {
+  const j = Math.sin(gt * 15 + ph * 7);
+  const j2 = Math.sin(gt * 23 + ph * 13);
+  ctx.fillStyle = "#d94f22";
+  ctx.fillRect(x - 2, y - 3, 4, 4);
+  ctx.fillStyle = "#ff9c3a";
+  ctx.fillRect(x - 1, y - 5, 2, 5);
+  ctx.fillStyle = "#ffe98a";
+  ctx.fillRect(x - 1 + (j > 0.4 ? 1 : j < -0.4 ? -1 : 0), y - 6, 1, 3);
+  if (j2 > 0.72) {
+    ctx.fillStyle = "#ff9c3a";
+    ctx.fillRect(x + (j > 0 ? -1 : 1), y - 8, 1, 1);
+  }
+}
+function drawBarricade(g, wl) {
+  const ctx = g.ctx;
+  const y = Math.round(wl.y);
+  let cur = STREET_L;
+  const segs = [];
+  for (const gp of wl.gaps) {
+    segs.push([cur, gp.x - gp.w / 2]);
+    cur = gp.x + gp.w / 2;
+  }
+  segs.push([cur, STREET_R]);
+  for (const [x0, x1] of segs) {
+    const w = x1 - x0;
+    if (w <= 0)
+      continue;
+    ctx.fillStyle = "#4b3531";
+    ctx.fillRect(x0, y, w, WALL_H);
+    ctx.fillStyle = "#3a2825";
+    for (let ry = 4;ry < WALL_H; ry += 4)
+      ctx.fillRect(x0, y + ry, w, 1);
+    for (let ry = 0;ry < WALL_H; ry += 4) {
+      const stagger = ry / 4 % 2 * 6;
+      for (let x = x0 + stagger;x < x1; x += 12) {
+        if (x > x0)
+          ctx.fillRect(x, y + ry, 1, 4);
+      }
+    }
+    ctx.fillStyle = "#61463f";
+    ctx.fillRect(x0, y, w, 1);
+    ctx.fillStyle = "#2c1e1b";
+    ctx.fillRect(x0, y + WALL_H - 1, w, 1);
+  }
+  for (const gp of wl.gaps) {
+    for (const side of [-1, 1]) {
+      const px = Math.round(gp.x + side * gp.w / 2) - (side < 0 ? 4 : 0);
+      ctx.fillStyle = "#5c3d26";
+      ctx.fillRect(px, y - 3, 4, WALL_H + 6);
+      ctx.fillStyle = "#402a1a";
+      ctx.fillRect(px + 3, y - 3, 1, WALL_H + 6);
+      ctx.fillRect(px, y + 1, 4, 1);
+      ctx.fillRect(px, y + 6, 4, 1);
+      ctx.fillStyle = "#6b4a2f";
+      ctx.fillRect(px, y - 3, 4, 1);
+    }
+    const tx = Math.round(gp.x - gp.w / 2 - 2);
+    drawFlame(ctx, tx, y - 6, g.gt, gp.x);
+    lights.push({ x: tx, y: y - 8, r: 18, ph: gp.x, warm: true });
+  }
+}
+function drawDarkness(g) {
+  const lc = g.lightCtx;
+  lc.globalCompositeOperation = "source-over";
+  lc.clearRect(0, 0, W, H);
+  lc.fillStyle = "rgba(8,6,14,0.62)";
+  lc.fillRect(0, 0, W, H);
+  lc.globalCompositeOperation = "destination-out";
+  for (const l of lights) {
+    const r = l.r * (1 + 0.06 * Math.sin(g.gt * 13 + l.ph));
+    const a = l.a ?? 0.95;
+    const gr = lc.createRadialGradient(l.x, l.y, 1, l.x, l.y, r);
+    gr.addColorStop(0, `rgba(0,0,0,${a})`);
+    gr.addColorStop(0.55, `rgba(0,0,0,${a * 0.55})`);
+    gr.addColorStop(1, "rgba(0,0,0,0)");
+    lc.fillStyle = gr;
+    lc.fillRect(Math.round(l.x - r), Math.round(l.y - r), Math.ceil(r * 2), Math.ceil(r * 2));
+  }
+  g.ctx.drawImage(g.lightCanvas, 0, 0);
+}
+function drawWarmGlow(g) {
+  const ctx = g.ctx;
+  ctx.globalCompositeOperation = "lighter";
+  for (const l of lights) {
+    if (!l.warm)
+      continue;
+    const r = l.r * 0.8 * (1 + 0.05 * Math.sin(g.gt * 13 + l.ph));
+    const gr = ctx.createRadialGradient(l.x, l.y, 1, l.x, l.y, r);
+    gr.addColorStop(0, "rgba(255,150,60,0.11)");
+    gr.addColorStop(1, "rgba(255,150,60,0)");
+    ctx.fillStyle = gr;
+    ctx.fillRect(Math.round(l.x - r), Math.round(l.y - r), Math.ceil(r * 2), Math.ceil(r * 2));
+  }
+  ctx.globalCompositeOperation = "source-over";
+}
+function drawTopAndVignette(g) {
+  const ctx = g.ctx;
+  let gr = ctx.createLinearGradient(0, 0, 0, 45);
+  gr.addColorStop(0, "rgba(0,0,0,0.5)");
+  gr.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, 0, W, 45);
+  gr = ctx.createRadialGradient(W / 2, H / 2, H * 0.34, W / 2, H / 2, H * 0.72);
+  gr.addColorStop(0, "rgba(0,0,0,0)");
+  gr.addColorStop(1, "rgba(0,0,0,0.38)");
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, 0, W, H);
+}
+function drawHUD(g) {
+  const ctx = g.ctx;
+  ctx.drawImage(g.skull, 8, 6);
+  drawTextO(ctx, `ЗАРАЖЕНО: ${g.score}`, 18, 7, "#e8e2d4", 1);
+  drawTextO(ctx, `РЕКОРД: ${g.best}`, 18, 17, "#a89a80", 1);
+  if (g.combo >= 2 && g.comboT > 0) {
+    drawTextO(ctx, `СЕРИЯ x${g.combo}`, 18, 27, "#8fe05a", 1);
+  }
+  const bw = 28;
+  const bx = Math.round(g.ratX - bw / 2);
+  const by = RAT_Y + 15;
+  ctx.fillStyle = "#0c0806";
+  ctx.fillRect(bx - 1, by - 1, bw + 2, 5);
+  ctx.fillStyle = "#241c18";
+  ctx.fillRect(bx, by, bw, 3);
+  const f = g.sneezeCd <= 0 ? 1 : 1 - g.sneezeCd / 1.2;
+  ctx.fillStyle = f >= 1 ? "#8fe05a" : "#5a8a3a";
+  ctx.fillRect(bx, by, Math.round(bw * f), 3);
+  drawText(ctx, "P-ПАУЗА M-ЗВУК", W - 6, H - 7, "rgba(170,156,138,0.6)", 1, "right");
+}
+function drawMenu(g) {
+  const ctx = g.ctx;
+  ctx.drawImage(g.rat, VW / 2 - 22, 46, 45, 36);
+  drawTextO(ctx, "ЧУМНАЯ", VW / 2, 94, "#9dd05e", 3, "center");
+  drawTextO(ctx, "КРЫСА", VW / 2, 122, "#d8c9a3", 3, "center");
+  drawText(ctx, "СРЕДНЕВЕКОВАЯ АРКАДА", VW / 2, 156, "#8a7f72", 1, "center");
+  const lines = [
+    ["← → ИЛИ МЫШЬ - ХОДИТЬ", "#cfc6b8"],
+    ["ПРОБЕЛ ИЛИ КЛИК - ЧИХАТЬ", "#cfc6b8"],
+    ["ЧИХАЙ НА ЛЮДЕЙ И ЗАРАЖАЙ", "#8fe05a"],
+    ["ДОКТОРЫ ЖГУТ ОГНЁМ!", "#e2622a"],
+    ["ПРОСКАКИВАЙ ВОРОТА В СТЕНАХ", "#d8c9a3"]
+  ];
+  lines.forEach(([t, c], i) => {
+    drawText(ctx, t, VW / 2, 200 + i * 14, c, 1, "center");
+  });
+  drawTextO(ctx, `РЕКОРД: ${g.best}`, VW / 2, 290, "#d8b45a", 2, "center");
+  if (Math.sin(g.gt * 3.2) > -0.3) {
+    drawTextO(ctx, "НАЖМИ ПРОБЕЛ - ИГРАТЬ", VW / 2, 336, "#9dd05e", 1, "center");
+  }
+  drawText(ctx, `M - ЗВУК: ${g.sound.muted ? "ВЫКЛ" : "ВКЛ"}`, VW / 2, 420, "rgba(170,156,138,0.7)", 1, "center");
+}
+function drawDead(g) {
+  const ctx = g.ctx;
+  drawTextO(ctx, "ТЫ ПОГИБ", VW / 2, 128, "#e2622a", 3, "center");
+  if (g.deathCause === "fire") {
+    drawText(ctx, "ТЕБЯ СОЖГЛИ ОГНЁМ", VW / 2, 168, "#ffb85c", 1, "center");
+  } else {
+    drawText(ctx, "ТЕБЯ РАЗДАВИЛО СТЕНОЙ", VW / 2, 168, "#cfc6b8", 1, "center");
+  }
+  drawTextO(ctx, `ЗАРАЖЕНО: ${g.score}`, VW / 2, 204, "#8fe05a", 2, "center");
+  if (g.newRecord) {
+    if (Math.sin(g.gt * 5) > -0.4) {
+      drawTextO(ctx, "НОВЫЙ РЕКОРД!", VW / 2, 244, "#ffd75e", 2, "center");
+    }
+  } else {
+    drawText(ctx, `РЕКОРД: ${g.best}`, VW / 2, 248, "#a89a80", 1, "center");
+  }
+  drawText(ctx, `ВЫЖИЛ: ${Math.round(g.time)} СЕК`, VW / 2, 282, "#a89a80", 1, "center");
+  if (g.deadT > 0.7 && Math.sin(g.gt * 3.2) > -0.3) {
+    drawTextO(ctx, "ПРОБЕЛ - ЗАНОВО", VW / 2, 330, "#e8e2d4", 1, "center");
+  }
+}
+function drawPause(g) {
+  const ctx = g.ctx;
+  drawTextO(ctx, "ПАУЗА", VW / 2, 190, "#d8c9a3", 3, "center");
+  drawText(ctx, "P ИЛИ ESC - ПРОДОЛЖИТЬ", VW / 2, 242, "#a89a80", 1, "center");
+  drawText(ctx, `M - ЗВУК: ${g.sound.muted ? "ВЫКЛ" : "ВКЛ"}`, VW / 2, 258, "#a89a80", 1, "center");
+}
+
+// src/game/sprites.ts
+function makeSprite(rows, palette) {
+  const w = rows[0].length;
+  const h = rows.length;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  for (let y = 0;y < h; y++) {
+    const row = rows[y];
+    for (let x = 0;x < w; x++) {
+      const ch = row[x];
+      if (ch === "." || ch === undefined)
+        continue;
+      const col = palette[ch];
+      if (!col)
+        continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  return c;
+}
+var RAT_ROWS = [
+  "..dd.......dd..",
+  ".dppd.....dppd.",
+  ".dPpd.....dpPd.",
+  "..ddddddddddd..",
+  "...ddddddddd...",
+  "..ggggglggggg..",
+  ".gggggglgggggg.",
+  ".gggggglgggggg.",
+  ".gggggglgggggg.",
+  "..ggggglggggg..",
+  "..dgggggggggd..",
+  "..dd..ddd..dd.."
+];
+var RAT_PAL = {
+  g: "#8f8f99",
+  d: "#5c5c66",
+  l: "#a8a8b4",
+  p: "#d98a8a",
+  P: "#a05f66"
+};
+function makeRat() {
+  return makeSprite(RAT_ROWS, RAT_PAL);
+}
+var PERSON_A = [
+  "....hhhhh....",
+  "...hhhhhhh...",
+  "...hfffffh...",
+  "...hfefefh...",
+  "...hfffffh...",
+  "....ttttt....",
+  "...ttttttt...",
+  "..ttttttttt..",
+  "..ftttttttf..",
+  "...trrrrrt...",
+  "...ttttttt...",
+  "...tt...tt...",
+  "...tt...tt...",
+  "..bbb...bbb.."
+];
+var PERSON_B = [
+  "....hhhhh....",
+  "...hhhhhhh...",
+  "...hfffffh...",
+  "...hfefefh...",
+  "...hfffffh...",
+  "....ttttt....",
+  "...ttttttt...",
+  "..ttttttttt..",
+  "..ftttttttf..",
+  "...trrrrrt...",
+  "...ttttttt...",
+  "..tt.....tt..",
+  "...tt...tt...",
+  "..bb.....bb.."
+];
+function personPal(h, t, r, sick = false) {
+  return sick ? {
+    h: "#5f7a45",
+    f: "#ccd8b0",
+    e: "#fffb9a",
+    t: "#7d9c55",
+    r: "#57703c",
+    b: "#42502e"
+  } : { h, f: "#e2b48c", e: "#241a12", t, r, b: "#4a3524" };
+}
+function makePersonVariants() {
+  const variants = [
+    { h: "#7a5a3a", t: "#8a6a45", r: "#5c452c" },
+    { h: "#5a6b3a", t: "#6f7d48", r: "#4d5832" },
+    { h: "#555f6e", t: "#66707f", r: "#4a525e" },
+    { h: "#7a3a3a", t: "#8d4a45", r: "#63312e" },
+    { h: "#c9b8a0", t: "#7d6a55", r: "#5e5142" },
+    { h: "#4e4438", t: "#6b5d4a", r: "#8a7a5a" }
+  ];
+  return variants.map((v) => ({
+    normal: [makeSprite(PERSON_A, personPal(v.h, v.t, v.r)), makeSprite(PERSON_B, personPal(v.h, v.t, v.r))],
+    sick: [makeSprite(PERSON_A, personPal(v.h, v.t, v.r, true)), makeSprite(PERSON_B, personPal(v.h, v.t, v.r, true))]
+  }));
+}
+var DOCTOR_ROWS = [
+  "...bbbbbbb...",
+  "..bbbbbbbbb..",
+  "bbbbbbbbbbbbb",
+  "..wwwwwwwww..",
+  "..wewwwwwew..",
+  "..wwwwwwwww..",
+  "...wwwwwww...",
+  "....wwwww....",
+  ".....www.....",
+  "..bbbbbbbbb..",
+  ".bbbbbbbbbbb.",
+  ".bbwbbbbwbbb.",
+  ".bbbbbbbbbbb.",
+  ".bbbbbbbbbbb.",
+  "..bbbbbbbbb..",
+  "..bbbbbbbbb.."
+];
+function makeDoctor(charging) {
+  const pal = {
+    b: "#17141c",
+    w: "#e8e2d4",
+    g: "#3a3440",
+    e: charging ? "#ff4034" : "#1a1214"
+  };
+  return makeSprite(DOCTOR_ROWS, pal);
+}
+var SKULL_ROWS = [
+  ".wwwww.",
+  "wwwwwww",
+  "wkkwkkw",
+  "wwwwwww",
+  ".wwwww.",
+  ".w.w.w.",
+  ".wwwww."
+];
+function makeSkull() {
+  return makeSprite(SKULL_ROWS, { w: "#d8d3c8", k: "#171310" });
+}
+function mulberry32(seed) {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function makeCobblePattern() {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d");
+  const rnd = mulberry32(1337);
+  ctx.fillStyle = "#161216";
+  ctx.fillRect(0, 0, 64, 64);
+  const stones = ["#241f24", "#292329", "#2d262e", "#211c22", "#262028"];
+  for (let ry = 0;ry < 17; ry++) {
+    const off = ry % 2 * 3;
+    for (let rx = -1;rx < 13; rx++) {
+      const x = rx * 5 + off;
+      const y = ry * 4;
+      const w = 4;
+      const h = 3;
+      ctx.fillStyle = stones[Math.floor(rnd() * stones.length)];
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = "#1a151b";
+      ctx.fillRect(x, y + h - 1, w, 1);
+      if (rnd() < 0.35) {
+        ctx.fillStyle = "#332b34";
+        ctx.fillRect(x, y, w, 1);
+      }
+    }
+  }
+  for (let i = 0;i < 26; i++) {
+    ctx.fillStyle = rnd() < 0.5 ? "#2e3a24" : "#1d1820";
+    ctx.fillRect(Math.floor(rnd() * 64), Math.floor(rnd() * 64), 1, 1);
+  }
+  return c;
+}
+function makeSideBrickPattern() {
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 48;
+  const ctx = c.getContext("2d");
+  const rnd = mulberry32(4242);
+  ctx.fillStyle = "#120d10";
+  ctx.fillRect(0, 0, 16, 48);
+  const bricks = ["#231a1c", "#281e20", "#1e1618", "#2b2124"];
+  for (let ry = 0;ry < 12; ry++) {
+    const off = ry % 2 * 4;
+    for (let rx = -1;rx < 3; rx++) {
+      const x = rx * 8 + off;
+      const y = ry * 4;
+      ctx.fillStyle = bricks[Math.floor(rnd() * bricks.length)];
+      ctx.fillRect(x, y, 7, 3);
+    }
+  }
+  return c;
+}
+
+// src/game/engine.ts
+var W = 160;
+var H = 240;
+var VW = 320;
+var VH2 = 480;
+var STREET_L = 9;
+var STREET_R = W - 9;
+var RAT_Y = H - 31;
+var WALL_H = 14;
+var RAT_SPEED = 99;
+var SNEEZE_CD = 1.2;
+var SNEEZE_RANGE = 48;
+var SNEEZE_SLOPE = 0.85;
+var SNEEZE_HALO = 13;
+var MILESTONES = [
+  { n: 10, text: "ЧУМА НАЧАЛАСЬ!" },
+  { n: 25, text: "ЭПИДЕМИЯ!" },
+  { n: 50, text: "ГОРОД ЗАРАЖАЕТСЯ!" },
+  { n: 75, text: "МОР РАЗГОРАЕТСЯ!" },
+  { n: 100, text: "СОТНЯ ЗАРАЖЁННЫХ!" },
+  { n: 150, text: "УЛИЦЫ ПУСТЕЮТ..." },
+  { n: 200, text: "ВЕЛИКИЙ МОР!" },
+  { n: 300, text: "ГОРОД ПАЛ!" },
+  { n: 400, text: "ЧУМА - КОРОЛЕВА!" },
+  { n: 500, text: "АПОКАЛИПСИС!" }
+];
+var rand = (a, b) => a + Math.random() * (b - a);
+var clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+class Game2 {
+  phase = "menu";
+  canvas;
+  ctx;
+  rat;
+  variants;
+  docNormal;
+  docCharge;
+  skull;
+  cobble;
+  sideBrick;
+  lightCanvas;
+  lightCtx;
+  sound = new SoundBox;
+  keyLeft = false;
+  keyRight = false;
+  pointerX = null;
+  pointerFresh = 0;
+  sneezeQueued = false;
+  ratX = W / 2;
+  ratVisible = true;
+  sneezeCd = 0;
+  sneezeAnim = 0;
+  scroll = 0;
+  time = 0;
+  gt = 0;
+  score = 0;
+  best = 0;
+  combo = 0;
+  comboT = 0;
+  levelShown = 0;
+  milestoneIdx = 0;
+  people = [];
+  doctors = [];
+  fireballs = [];
+  walls = [];
+  torches = [];
+  decos = [];
+  particles = [];
+  floats = [];
+  personT = 1;
+  doctorT = 8;
+  torchAcc = 0;
+  decoAcc = 0;
+  distSinceWall = 0;
+  nextWallGap = 300;
+  lastGapX = W / 2;
+  shakeT = 0;
+  deathCause = "fire";
+  deadT = 0;
+  newRecord = false;
+  raf = 0;
+  lastFrame = 0;
+  cleanups = [];
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.rat = makeRat();
+    this.variants = makePersonVariants();
+    this.docNormal = makeDoctor(false);
+    this.docCharge = makeDoctor(true);
+    this.skull = makeSkull();
+    this.cobble = makeCobblePattern();
+    this.sideBrick = makeSideBrickPattern();
+    this.lightCanvas = document.createElement("canvas");
+    this.lightCanvas.width = W;
+    this.lightCanvas.height = H;
+    this.lightCtx = this.lightCanvas.getContext("2d");
+    try {
+      this.best = parseInt(localStorage.getItem("plague_rat_best") ?? "0", 10) || 0;
+      this.sound.setMuted(localStorage.getItem("plague_rat_mute") === "1");
+    } catch {}
+    this.attachInput();
+    this.lastFrame = performance.now();
+    const loop = (now) => {
+      const dt = clamp((now - this.lastFrame) / 1000, 0.001, 0.05);
+      this.lastFrame = now;
+      this.update(dt);
+      this.renderWrapper();
+      this.raf = requestAnimationFrame(loop);
+    };
+    this.raf = requestAnimationFrame(loop);
+  }
+  destroy() {
+    cancelAnimationFrame(this.raf);
+    this.sound.stopMusic();
+    for (const fn of this.cleanups)
+      fn();
+    this.cleanups = [];
+  }
+  renderWrapper() {
+    renderGame(this);
+  }
+  attachInput() {
+    const kd = (e) => {
+      if (e.code === "ArrowLeft" || e.code === "KeyA") {
+        this.keyLeft = true;
+        e.preventDefault();
+      } else if (e.code === "ArrowRight" || e.code === "KeyD") {
+        this.keyRight = true;
+        e.preventDefault();
+      } else if (e.code === "Space" || e.code === "Enter") {
+        e.preventDefault();
+        if (this.phase === "play")
+          this.sneezeQueued = true;
+        else if (this.phase === "menu")
+          this.start();
+        else if (this.phase === "dead" && this.deadT > 0.7)
+          this.start();
+        else if (this.phase === "pause")
+          this.togglePause();
+      } else if (e.code === "KeyP" || e.code === "Escape") {
+        if (this.phase === "play" || this.phase === "pause")
+          this.togglePause();
+      } else if (e.code === "KeyM") {
+        this.toggleMute();
+      }
+    };
+    const ku = (e) => {
+      if (e.code === "ArrowLeft" || e.code === "KeyA")
+        this.keyLeft = false;
+      if (e.code === "ArrowRight" || e.code === "KeyD")
+        this.keyRight = false;
+    };
+    const toGameX = (clientX) => {
+      const r = this.canvas.getBoundingClientRect();
+      return clamp((clientX - r.left) / r.width * W, 0, W);
+    };
+    const pm = (e) => {
+      this.pointerX = toGameX(e.clientX);
+      this.pointerFresh = 1.6;
+    };
+    const pd = (e) => {
+      e.preventDefault();
+      this.pointerX = toGameX(e.clientX);
+      this.pointerFresh = 1.6;
+      if (this.phase === "play")
+        this.sneezeQueued = true;
+      else if (this.phase === "menu")
+        this.start();
+      else if (this.phase === "dead" && this.deadT > 0.7)
+        this.start();
+      else if (this.phase === "pause")
+        this.togglePause();
+    };
+    const vis = () => {
+      if (document.hidden && this.phase === "play")
+        this.togglePause();
+    };
+    window.addEventListener("keydown", kd);
+    window.addEventListener("keyup", ku);
+    this.canvas.addEventListener("pointermove", pm);
+    this.canvas.addEventListener("pointerdown", pd);
+    document.addEventListener("visibilitychange", vis);
+    this.cleanups.push(() => {
+      window.removeEventListener("keydown", kd);
+      window.removeEventListener("keyup", ku);
+      this.canvas.removeEventListener("pointermove", pm);
+      this.canvas.removeEventListener("pointerdown", pd);
+      document.removeEventListener("visibilitychange", vis);
+    });
+  }
+  toggleMute() {
+    this.sound.ensure();
+    this.sound.setMuted(!this.sound.muted);
+    this.floats.push({
+      x: W / 2,
+      y: H - 70,
+      text: this.sound.muted ? "ЗВУК ВЫКЛ" : "ЗВУК ВКЛ",
+      color: "#cfc6b8",
+      t: 0,
+      life: 1,
+      scale: 1
+    });
+  }
+  togglePause() {
+    if (this.phase === "play") {
+      this.phase = "pause";
+      this.sound.stopMusic();
+    } else if (this.phase === "pause") {
+      this.phase = "play";
+      this.lastFrame = performance.now();
+      this.sound.startMusic();
+    }
+  }
+  start() {
+    this.phase = "play";
+    this.time = 0;
+    this.score = 0;
+    this.combo = 0;
+    this.comboT = 0;
+    this.levelShown = 0;
+    this.milestoneIdx = 0;
+    this.people = [];
+    this.doctors = [];
+    this.fireballs = [];
+    this.walls = [];
+    this.torches = [];
+    this.decos = [];
+    this.particles = [];
+    this.floats = [];
+    this.ratX = W / 2;
+    this.ratVisible = true;
+    this.sneezeCd = 0.4;
+    this.sneezeAnim = 0;
+    this.personT = 0.5;
+    this.doctorT = 12;
+    this.torchAcc = 30;
+    this.decoAcc = 15;
+    this.distSinceWall = -60;
+    this.nextWallGap = rand(130, 170);
+    this.lastGapX = W / 2;
+    this.shakeT = 0;
+    this.newRecord = false;
+    this.sound.ensure();
+    this.sound.startMusic();
+    this.sound.click();
+  }
+  die(cause) {
+    this.phase = "dead";
+    this.deathCause = cause;
+    this.deadT = 0;
+    this.shakeT = 0.5;
+    this.ratVisible = false;
+    this.newRecord = this.score > this.best;
+    if (this.newRecord) {
+      this.best = this.score;
+      try {
+        localStorage.setItem("plague_rat_best", String(this.best));
+      } catch {}
+    }
+    this.sound.stopMusic();
+    this.sound.death();
+    if (cause === "fire") {
+      for (let i = 0;i < 30; i++) {
+        this.particles.push({
+          x: this.ratX + rand(-6, 6),
+          y: RAT_Y + rand(-6, 6),
+          vx: rand(-45, 45),
+          vy: rand(-70, 10),
+          life: rand(0.4, 0.9),
+          t: 0,
+          color: ["#e2622a", "#ff9c3a", "#ffd75e", "#8f8f99"][Math.floor(rand(0, 4))],
+          size: rand(1, 2.5),
+          grav: 80
+        });
+      }
+    } else {
+      for (let i = 0;i < 26; i++) {
+        this.particles.push({
+          x: this.ratX + rand(-10, 10),
+          y: RAT_Y + rand(-6, 6),
+          vx: rand(-40, 40),
+          vy: rand(-65, -5),
+          life: rand(0.4, 0.8),
+          t: 0,
+          color: ["#6b4a3a", "#4b3531", "#8f8f99", "#5c5c66"][Math.floor(rand(0, 4))],
+          size: rand(1, 2.5),
+          grav: 110
+        });
+      }
+    }
+  }
+  update(dt) {
+    this.gt += dt;
+    this.blink(dt);
+    if (this.phase === "menu") {
+      this.updateWorld(dt, 13, false);
+      return;
+    }
+    if (this.phase === "pause")
+      return;
+    if (this.phase === "dead") {
+      this.deadT += dt;
+      this.shakeT = Math.max(0, this.shakeT - dt);
+      this.updateParticles(dt);
+      this.updateFloats(dt);
+      return;
+    }
+    this.time += dt;
+    const ws = Math.min(31 + this.time * 0.775, 116);
+    const lv = Math.floor(this.time / 30);
+    if (lv > this.levelShown) {
+      this.levelShown = lv;
+      this.floats.push({
+        x: W / 2,
+        y: 60,
+        text: "МИР УСКОРЯЕТСЯ!",
+        color: "#e2a23a",
+        t: 0,
+        life: 1.6,
+        scale: 1
+      });
+      this.sound.click();
+    }
+    this.pointerFresh = Math.max(0, this.pointerFresh - dt);
+    if (this.keyLeft && !this.keyRight) {
+      this.ratX -= RAT_SPEED * dt;
+      this.pointerFresh = 0;
+    } else if (this.keyRight && !this.keyLeft) {
+      this.ratX += RAT_SPEED * dt;
+      this.pointerFresh = 0;
+    } else if (this.pointerX !== null && this.pointerFresh > 0) {
+      const d = this.pointerX - this.ratX;
+      const step = clamp(d, -160 * dt, 160 * dt);
+      this.ratX += Math.abs(d) > 1.5 ? step : d;
+    }
+    this.ratX = clamp(this.ratX, STREET_L + 9, STREET_R - 9);
+    this.sneezeCd = Math.max(0, this.sneezeCd - dt);
+    this.sneezeAnim = Math.max(0, this.sneezeAnim - dt);
+    if (this.sneezeQueued) {
+      this.sneezeQueued = false;
+      if (this.sneezeCd <= 0)
+        this.doSneeze();
+    }
+    this.comboT = Math.max(0, this.comboT - dt);
+    if (this.comboT <= 0)
+      this.combo = 0;
+    this.shakeT = Math.max(0, this.shakeT - dt);
+    this.updateWorld(dt, ws, true);
+  }
+  blink(dt) {
+    this.updateFloats(dt);
+    this.updateParticles(dt);
+  }
+  updateWorld(dt, ws, playing) {
+    this.scroll += ws * dt;
+    this.torchAcc += ws * dt;
+    if (this.torchAcc >= 44) {
+      this.torchAcc -= 44;
+      this.torches.push({ x: 4, y: -5, ph: rand(0, 6) });
+      this.torches.push({ x: W - 4, y: -5, ph: rand(0, 6) });
+    }
+    this.decoAcc += ws * dt;
+    if (this.decoAcc >= 75) {
+      this.decoAcc -= 75;
+      const side = Math.random() < 0.5;
+      this.decos.push({ x: side ? 4 : W - 4, y: -7, lit: Math.random() < 0.55 });
+    }
+    if (playing) {
+      this.personT -= dt;
+      if (this.personT <= 0) {
+        this.personT = Math.max(0.32, 0.95 - this.time * 0.006) * rand(0.7, 1.25);
+        const cluster = 1 + (Math.random() < 0.3 ? 1 : 0) + (this.time > 45 && Math.random() < 0.15 ? 1 : 0);
+        for (let i = 0;i < cluster; i++)
+          this.spawnPerson(-7 - i * rand(4, 11));
+      }
+      this.distSinceWall += ws * dt;
+      if (this.distSinceWall >= this.nextWallGap) {
+        this.spawnWall();
+      }
+      this.doctorT -= dt;
+      const cap = this.time > 75 ? 3 : this.time > 30 ? 2 : 1;
+      if (this.doctorT <= 0 && this.doctors.length < cap) {
+        this.doctorT = Math.max(3.2, 8.5 - this.time * 0.05) * rand(0.8, 1.3);
+        this.spawnDoctor(-9);
+      }
+    } else {
+      this.personT -= dt;
+      if (this.personT <= 0) {
+        this.personT = rand(1.2, 2.4);
+        this.spawnPerson(-7);
+      }
+    }
+    for (let i = this.people.length - 1;i >= 0; i--) {
+      const p = this.people[i];
+      const spd = p.infected ? p.walk * 0.45 : p.walk;
+      p.y += (ws + spd) * dt;
+      p.wob += dt;
+      p.x += Math.sin(p.wob * 2.2) * 2.5 * dt;
+      p.frameT += dt * (spd / 4.5 + 1.2);
+      if (p.frameT >= 0.22) {
+        p.frameT = 0;
+        p.frame = 1 - p.frame;
+      }
+      let nearest = null;
+      for (const wl of this.walls) {
+        const d = wl.y - p.y;
+        if (d > -2 && d < 26 && (!nearest || wl.y < nearest.y))
+          nearest = wl;
+      }
+      if (nearest && nearest.gaps.length > 0) {
+        let gx = nearest.gaps[0].x;
+        let bestD = Math.abs(gx - p.x);
+        for (const g of nearest.gaps) {
+          const dd = Math.abs(g.x - p.x);
+          if (dd < bestD) {
+            bestD = dd;
+            gx = g.x;
+          }
+        }
+        p.x += clamp(gx - p.x, -21 * dt, 21 * dt);
+      }
+      p.x = clamp(p.x, STREET_L + 6, STREET_R - 6);
+      if (playing && p.infected) {
+        p.coughT -= dt;
+        if (p.coughT <= 0) {
+          p.coughT = rand(0.8, 1.6);
+          this.particles.push({
+            x: p.x + rand(-2, 2),
+            y: p.y - 8,
+            vx: rand(-4, 4),
+            vy: rand(-8, -3),
+            life: 0.5,
+            t: 0,
+            color: "#9dd05e",
+            size: 1.5,
+            grav: -4
+          });
+        }
+        p.spreadT -= dt;
+        if (p.spreadT <= 0) {
+          p.spreadT = rand(0.9, 1.5);
+          for (const q of this.people) {
+            if (!q.infected && Math.abs(q.x - p.x) < 11 && Math.abs(q.y - p.y) < 10) {
+              this.infect(q, 2);
+              break;
+            }
+          }
+        }
+      }
+      if (p.y > H + 12)
+        this.people.splice(i, 1);
+    }
+    for (let i = this.walls.length - 1;i >= 0; i--) {
+      const wl = this.walls[i];
+      wl.y += ws * dt;
+      if (playing && wl.y < RAT_Y + 5 && wl.y + WALL_H > RAT_Y - 5) {
+        let safe = false;
+        for (const g of wl.gaps) {
+          if (Math.abs(this.ratX - g.x) < g.w / 2 - 6)
+            safe = true;
+        }
+        if (!safe)
+          this.die("wall");
+      }
+      if (wl.y > H + 15)
+        this.walls.splice(i, 1);
+    }
+    for (let i = this.doctors.length - 1;i >= 0; i--) {
+      const d = this.doctors[i];
+      const charging = d.chargeT > 0;
+      d.y += (ws + (charging ? 0 : d.walk)) * (charging ? 0.35 : 1) * dt;
+      d.wob += dt;
+      if (charging) {
+        d.chargeT -= dt;
+        if (d.chargeT <= 0) {
+          this.throwFire(d);
+          d.cd = rand(2.6, 4.2);
+        }
+      } else {
+        d.cd -= dt;
+        if (playing && d.cd <= 0 && d.y > 3 && d.y < RAT_Y - 21) {
+          d.chargeT = 0.85;
+          this.sound.warn();
+        }
+      }
+      let nearest = null;
+      for (const wl of this.walls) {
+        const dd = wl.y - d.y;
+        if (dd > -2 && dd < 26 && (!nearest || wl.y < nearest.y))
+          nearest = wl;
+      }
+      if (nearest && nearest.gaps.length > 0) {
+        let gx = nearest.gaps[0].x;
+        let bestD = Math.abs(gx - d.x);
+        for (const g of nearest.gaps) {
+          const ddx = Math.abs(g.x - d.x);
+          if (ddx < bestD) {
+            bestD = ddx;
+            gx = g.x;
+          }
+        }
+        d.x += clamp(gx - d.x, -18 * dt, 18 * dt);
+      }
+      d.x = clamp(d.x, STREET_L + 8, STREET_R - 8);
+      if (d.y > H + 13)
+        this.doctors.splice(i, 1);
+    }
+    for (let i = this.fireballs.length - 1;i >= 0; i--) {
+      const f = this.fireballs[i];
+      f.t += dt;
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      if (Math.random() < 0.6) {
+        this.particles.push({
+          x: f.x + rand(-2, 2),
+          y: f.y + rand(-2, 2),
+          vx: rand(-7, 7),
+          vy: rand(-13, -2),
+          life: rand(0.2, 0.45),
+          t: 0,
+          color: Math.random() < 0.5 ? "#ff9c3a" : "#e2622a",
+          size: rand(1, 2),
+          grav: -15
+        });
+      }
+      if (playing && this.ratVisible) {
+        if (f.x > this.ratX - 8 && f.x < this.ratX + 8 && f.y > RAT_Y - 7 && f.y < RAT_Y + 7) {
+          this.fireballs.splice(i, 1);
+          this.die("fire");
+          continue;
+        }
+      }
+      if (f.y > H + 8 || f.x < -8 || f.x > W + 8)
+        this.fireballs.splice(i, 1);
+    }
+    for (let i = this.torches.length - 1;i >= 0; i--) {
+      const t = this.torches[i];
+      t.y += ws * dt;
+      if (Math.random() < 0.015) {
+        this.particles.push({
+          x: t.x + rand(-1, 1),
+          y: t.y - 12,
+          vx: rand(-2, 2),
+          vy: rand(-9, -4),
+          life: rand(0.3, 0.7),
+          t: 0,
+          color: "#ff9c3a",
+          size: 1,
+          grav: -7
+        });
+      }
+      if (t.y > H + 8)
+        this.torches.splice(i, 1);
+    }
+    for (let i = this.decos.length - 1;i >= 0; i--) {
+      const dc = this.decos[i];
+      dc.y += ws * dt;
+      if (dc.y > H + 10)
+        this.decos.splice(i, 1);
+    }
+  }
+  updateParticles(dt) {
+    for (let i = this.particles.length - 1;i >= 0; i--) {
+      const p = this.particles[i];
+      p.t += dt;
+      p.vy += p.grav * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.t >= p.life)
+        this.particles.splice(i, 1);
+    }
+  }
+  updateFloats(dt) {
+    for (let i = this.floats.length - 1;i >= 0; i--) {
+      const f = this.floats[i];
+      f.t += dt;
+      f.y -= 7 * dt;
+      if (f.t >= f.life)
+        this.floats.splice(i, 1);
+    }
+  }
+  doSneeze() {
+    this.sneezeCd = SNEEZE_CD;
+    this.sneezeAnim = 0.32;
+    this.sound.sneeze();
+    this.floats.push({
+      x: this.ratX,
+      y: RAT_Y - 26,
+      text: "АПЧХИ!",
+      color: "#e8e2d4",
+      t: 0,
+      life: 0.7,
+      scale: 1
+    });
+    for (let i = 0;i < 16; i++) {
+      this.particles.push({
+        x: this.ratX + rand(-4, 4),
+        y: RAT_Y - 8,
+        vx: rand(-23, 23),
+        vy: rand(-75, -27.5),
+        life: rand(0.25, 0.55),
+        t: 0,
+        color: Math.random() < 0.7 ? "#8fe05a" : "#c8f09a",
+        size: rand(1, 2),
+        grav: 95
+      });
+    }
+    const mx = this.ratX;
+    const my = RAT_Y - 8;
+    for (const p of this.people) {
+      if (p.infected)
+        continue;
+      const dx = p.x - mx;
+      const dyv = my - p.y;
+      if (dyv < -8)
+        continue;
+      const dist = Math.hypot(dx, dyv);
+      if (dist < SNEEZE_HALO || dist < SNEEZE_RANGE && Math.abs(dx) <= SNEEZE_SLOPE * Math.max(dyv, 5)) {
+        this.infect(p, 1);
+      }
+    }
+  }
+  infect(p, kind) {
+    if (p.infected)
+      return;
+    p.infected = true;
+    p.spreadT = rand(0.7, 1.2);
+    this.score++;
+    if (kind === 1) {
+      this.combo = this.comboT > 0 ? this.combo + 1 : 1;
+      this.comboT = 1.3;
+      this.sound.infect(this.combo);
+      this.floats.push({
+        x: p.x,
+        y: p.y - 12,
+        text: this.combo >= 3 ? `+1 x${this.combo}` : "+1",
+        color: "#8fe05a",
+        t: 0,
+        life: 0.8,
+        scale: 1
+      });
+    } else {
+      this.sound.spread();
+      this.floats.push({
+        x: p.x,
+        y: p.y - 12,
+        text: "+1",
+        color: "#7dbf5a",
+        t: 0,
+        life: 0.7,
+        scale: 1
+      });
+    }
+    for (let i = 0;i < 6; i++) {
+      this.particles.push({
+        x: p.x + rand(-3, 3),
+        y: p.y + rand(-6, 4),
+        vx: rand(-10, 10),
+        vy: rand(-20, -3),
+        life: rand(0.2, 0.45),
+        t: 0,
+        color: "#9dd05e",
+        size: rand(1, 1.8),
+        grav: 30
+      });
+    }
+    while (this.milestoneIdx < MILESTONES.length && this.score >= MILESTONES[this.milestoneIdx].n) {
+      const m = MILESTONES[this.milestoneIdx];
+      this.milestoneIdx++;
+      this.floats.push({
+        x: W / 2,
+        y: 75,
+        text: m.text,
+        color: "#d8b45a",
+        t: 0,
+        life: 1.8,
+        scale: 1.5
+      });
+      this.sound.milestone();
+    }
+  }
+  spawnPerson(y) {
+    let x;
+    const nextWall = this.walls.length > 0 ? this.walls[this.walls.length - 1] : null;
+    if (nextWall && Math.random() < 0.7) {
+      const g = nextWall.gaps[Math.floor(rand(0, nextWall.gaps.length))];
+      x = g.x + rand(-g.w / 3, g.w / 3);
+    } else {
+      x = rand(STREET_L + 5, STREET_R - 5);
+    }
+    this.people.push({
+      x: clamp(x, STREET_L + 6, STREET_R - 6),
+      y,
+      walk: rand(10, 20),
+      variant: Math.floor(rand(0, this.variants.length)),
+      frame: 0,
+      frameT: 0,
+      infected: false,
+      spreadT: 0,
+      coughT: 0,
+      wob: rand(0, 6)
+    });
+  }
+  spawnDoctor(y) {
+    let x;
+    const nextWall = this.walls.length > 0 ? this.walls[this.walls.length - 1] : null;
+    if (nextWall && Math.random() < 0.6) {
+      const g = nextWall.gaps[Math.floor(rand(0, nextWall.gaps.length))];
+      x = g.x + rand(-g.w / 3, g.w / 3);
+    } else {
+      x = rand(STREET_L + 5, STREET_R - 5);
+    }
+    this.doctors.push({
+      x: clamp(x, STREET_L + 8, STREET_R - 8),
+      y,
+      walk: rand(7, 13),
+      chargeT: 0,
+      cd: rand(0.4, 1.2),
+      wob: rand(0, 6)
+    });
+  }
+  spawnWall() {
+    const gwBase = Math.max(44, 88 - this.time * 0.5);
+    const gaps = [];
+    if (this.time > 40 && Math.random() < 0.26) {
+      const gw = Math.max(40, gwBase * 0.75);
+      const g1 = rand(STREET_L + gw / 2 + 4, W / 2 - 30);
+      const g2 = rand(W / 2 + 30, STREET_R - gw / 2 - 4);
+      gaps.push({ x: g1, w: gw }, { x: g2, w: gw });
+      this.lastGapX = Math.random() < 0.5 ? g1 : g2;
+    } else {
+      const gw = gwBase + rand(-5, 6);
+      const x = clamp(this.lastGapX + rand(-62.5, 62.5), STREET_L + gw / 2 + 4, STREET_R - gw / 2 - 4);
+      gaps.push({ x, w: gw });
+      this.lastGapX = x;
+    }
+    gaps.sort((a, b) => a.x - b.x);
+    this.walls.push({ y: -WALL_H - 4, gaps });
+    this.distSinceWall = 0;
+    this.nextWallGap = clamp(rand(115, 175) - this.time * 0.175, 87.5, 175);
+  }
+  throwFire(d) {
+    const sx = d.x;
+    const sy = d.y + 16;
+    const speed = 67.5 + Math.min(55, this.time * 0.3);
+    const dx = this.ratX - sx;
+    const dy = RAT_Y - sy;
+    const len = Math.max(1, Math.hypot(dx, dy));
+    this.fireballs.push({
+      x: sx,
+      y: sy,
+      vx: dx / len * speed,
+      vy: dy / len * speed,
+      t: 0
+    });
+    this.sound.fire();
+  }
+}
+
+// scripts/standalone/main.ts
+var canvas = document.getElementById("game");
+var game = new Game2(canvas);
+var fit = () => {
+  const scale = Math.min((window.innerWidth - 8) / VW, (window.innerHeight - 8) / VH2);
+  canvas.style.width = `${Math.floor(VW * scale)}px`;
+  canvas.style.height = `${Math.floor(VH2 * scale)}px`;
+};
+fit();
+window.addEventListener("resize", fit);
+
+</script>
+</body>
+</html>
