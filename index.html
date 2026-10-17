@@ -34,6 +34,7 @@ class SoundBox {
   musicTimer = null;
   nextNoteT = 0;
   step = 0;
+  lastRebuild = 0;
   muted = false;
   ensure() {
     if (this.ctx) {
@@ -67,13 +68,40 @@ class SoundBox {
       return;
     if (ctx.state === "running")
       return;
-    ctx.resume().catch(() => {});
+    ctx.resume().then(() => {
+      if (this.ctx && this.ctx.state !== "running")
+        this.rebuildCtx();
+    }, () => {
+      this.rebuildCtx();
+    });
     try {
+      const len = Math.floor(ctx.sampleRate * 0.1);
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0;i < len; i++)
+        d[i] = (i % 2 === 0 ? 1 : -1) * 0.002;
       const src = ctx.createBufferSource();
-      src.buffer = ctx.createBuffer(1, 1, 22050);
+      src.buffer = buf;
       src.connect(ctx.destination);
       src.start(0);
     } catch {}
+  }
+  rebuildCtx() {
+    const now = performance.now();
+    if (now - this.lastRebuild < 1000)
+      return;
+    this.lastRebuild = now;
+    const old = this.ctx;
+    this.ctx = null;
+    this.master = null;
+    this.sfxGain = null;
+    this.musicGain = null;
+    this.noiseBuf = null;
+    try {
+      old?.close().catch(() => {});
+    } catch {}
+    this.ensure();
+    this.nextNoteT = this.ctx ? this.ctx.currentTime + 0.05 : 0;
   }
   setMuted(m) {
     this.muted = m;
@@ -640,22 +668,17 @@ function drawSneezeButton(g) {
   const ready = g.sneezeCd <= 0;
   const f = ready ? 1 : Math.max(0, 1 - g.sneezeCd / SNEEZE_CD);
   const dy = g.btnPressed > 0 ? 1 : 0;
-  ctx.fillStyle = "rgba(16,11,20,0.78)";
+  ctx.fillStyle = g.btnPressed > 0 ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.2)";
   ctx.beginPath();
   ctx.arc(x, y + dy, r - 1.5, 0, Math.PI * 2);
   ctx.fill();
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = ready ? "rgba(143,224,90,0.5)" : "rgba(96,82,112,0.9)";
-  ctx.beginPath();
-  ctx.arc(x, y + dy, r - 1.5, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.lineWidth = 1.6;
-  ctx.strokeStyle = "rgba(232,226,212,0.15)";
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(232,226,212,0.1)";
   ctx.beginPath();
   ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
   ctx.stroke();
   const a1 = -Math.PI / 2 + f * Math.PI * 2;
-  ctx.lineWidth = ready ? 2 : 1.8;
+  ctx.lineWidth = 1.2;
   ctx.strokeStyle = ready ? "#a6f06a" : "#8fe05a";
   ctx.beginPath();
   ctx.arc(x, y, r + 2.5, -Math.PI / 2, a1);
@@ -663,19 +686,9 @@ function drawSneezeButton(g) {
   if (!ready) {
     ctx.fillStyle = "#c8f09a";
     ctx.beginPath();
-    ctx.arc(x + Math.cos(a1) * (r + 2.5), y + Math.sin(a1) * (r + 2.5), 1.6, 0, Math.PI * 2);
+    ctx.arc(x + Math.cos(a1) * (r + 2.5), y + Math.sin(a1) * (r + 2.5), 1.1, 0, Math.PI * 2);
     ctx.fill();
-  } else {
-    const p = 0.5 + 0.5 * Math.sin(g.gt * 6);
-    ctx.globalAlpha = 0.1 + 0.16 * p;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#c8f09a";
-    ctx.beginPath();
-    ctx.arc(x, y, r + 3.5 + p, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
   }
-  drawTextO(ctx, "АЧХ!", x, y + dy - 3, ready ? "#e8e2d4" : "rgba(232,226,212,0.4)", 1, "center");
 }
 function drawMenu(g) {
   const ctx = g.ctx;
@@ -1139,7 +1152,7 @@ class Game2 {
       if (document.hidden && this.phase === "play")
         this.togglePause();
       else if (!document.hidden)
-        this.sound.ensure();
+        this.sound.unlock();
     };
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
