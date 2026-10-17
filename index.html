@@ -37,8 +37,8 @@ class SoundBox {
   muted = false;
   ensure() {
     if (this.ctx) {
-      if (this.ctx.state === "suspended")
-        this.ctx.resume();
+      if (this.ctx.state !== "running")
+        this.ctx.resume().catch(() => {});
       return;
     }
     const AC = window.AudioContext ?? window.webkitAudioContext;
@@ -59,6 +59,21 @@ class SoundBox {
     const data = this.noiseBuf.getChannelData(0);
     for (let i = 0;i < len; i++)
       data[i] = Math.random() * 2 - 1;
+  }
+  unlock() {
+    this.ensure();
+    const ctx = this.ctx;
+    if (!ctx)
+      return;
+    if (ctx.state === "running")
+      return;
+    ctx.resume().catch(() => {});
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = ctx.createBuffer(1, 1, 22050);
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {}
   }
   setMuted(m) {
     this.muted = m;
@@ -183,6 +198,8 @@ class SoundBox {
     this.musicTimer = window.setInterval(() => {
       if (!this.ctx || !this.musicGain)
         return;
+      if (this.nextNoteT < this.ctx.currentTime - 0.2)
+        this.nextNoteT = this.ctx.currentTime + 0.05;
       while (this.nextNoteT < this.ctx.currentTime + 0.25) {
         const s = this.step % 16;
         const t0 = this.nextNoteT;
@@ -613,17 +630,52 @@ function drawHUD(g) {
   if (g.combo >= 2 && g.comboT > 0) {
     drawTextO(ctx, `СЕРИЯ x${g.combo}`, 18, 27, "#8fe05a", 1);
   }
-  const bw = 28;
-  const bx = Math.round(g.ratX - bw / 2);
-  const by = RAT_Y + 15;
-  ctx.fillStyle = "#0c0806";
-  ctx.fillRect(bx - 1, by - 1, bw + 2, 5);
-  ctx.fillStyle = "#241c18";
-  ctx.fillRect(bx, by, bw, 3);
-  const f = g.sneezeCd <= 0 ? 1 : 1 - g.sneezeCd / 1.2;
-  ctx.fillStyle = f >= 1 ? "#8fe05a" : "#5a8a3a";
-  ctx.fillRect(bx, by, Math.round(bw * f), 3);
-  drawText(ctx, "P-ПАУЗА M-ЗВУК", W - 6, H - 7, "rgba(170,156,138,0.6)", 1, "right");
+  if (g.phase === "play")
+    drawSneezeButton(g);
+  drawText(ctx, "P-ПАУЗА M-ЗВУК", 6, H - 7, "rgba(170,156,138,0.6)", 1, "left");
+}
+function drawSneezeButton(g) {
+  const ctx = g.ctx;
+  const { x, y, r } = BTN;
+  const ready = g.sneezeCd <= 0;
+  const f = ready ? 1 : Math.max(0, 1 - g.sneezeCd / SNEEZE_CD);
+  const dy = g.btnPressed > 0 ? 1 : 0;
+  ctx.fillStyle = "rgba(16,11,20,0.78)";
+  ctx.beginPath();
+  ctx.arc(x, y + dy, r - 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = ready ? "rgba(143,224,90,0.5)" : "rgba(96,82,112,0.9)";
+  ctx.beginPath();
+  ctx.arc(x, y + dy, r - 1.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = "rgba(232,226,212,0.15)";
+  ctx.beginPath();
+  ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
+  ctx.stroke();
+  const a1 = -Math.PI / 2 + f * Math.PI * 2;
+  ctx.lineWidth = ready ? 2 : 1.8;
+  ctx.strokeStyle = ready ? "#a6f06a" : "#8fe05a";
+  ctx.beginPath();
+  ctx.arc(x, y, r + 2.5, -Math.PI / 2, a1);
+  ctx.stroke();
+  if (!ready) {
+    ctx.fillStyle = "#c8f09a";
+    ctx.beginPath();
+    ctx.arc(x + Math.cos(a1) * (r + 2.5), y + Math.sin(a1) * (r + 2.5), 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    const p = 0.5 + 0.5 * Math.sin(g.gt * 6);
+    ctx.globalAlpha = 0.1 + 0.16 * p;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#c8f09a";
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3.5 + p, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  drawTextO(ctx, "АЧХ!", x, y + dy - 3, ready ? "#e8e2d4" : "rgba(232,226,212,0.4)", 1, "center");
 }
 function drawMenu(g) {
   const ctx = g.ctx;
@@ -632,8 +684,8 @@ function drawMenu(g) {
   drawTextO(ctx, "КРЫСА", VW / 2, 122, "#d8c9a3", 3, "center");
   drawText(ctx, "СРЕДНЕВЕКОВАЯ АРКАДА", VW / 2, 156, "#8a7f72", 1, "center");
   const lines = [
-    ["← → ИЛИ МЫШЬ - ХОДИТЬ", "#cfc6b8"],
-    ["ПРОБЕЛ ИЛИ КЛИК - ЧИХАТЬ", "#cfc6b8"],
+    ["← → , МЫШЬ ИЛИ ПАЛЕЦ - ХОДИТЬ", "#cfc6b8"],
+    ["ЧИХ - КНОПКА СЛЕВА ИЛИ ПРОБЕЛ", "#cfc6b8"],
     ["ЧИХАЙ НА ЛЮДЕЙ И ЗАРАЖАЙ", "#8fe05a"],
     ["ДОКТОРЫ ЖГУТ ОГНЁМ!", "#e2622a"],
     ["ПРОСКАКИВАЙ ВОРОТА В СТЕНАХ", "#d8c9a3"]
@@ -643,7 +695,7 @@ function drawMenu(g) {
   });
   drawTextO(ctx, `РЕКОРД: ${g.best}`, VW / 2, 290, "#d8b45a", 2, "center");
   if (Math.sin(g.gt * 3.2) > -0.3) {
-    drawTextO(ctx, "НАЖМИ ПРОБЕЛ - ИГРАТЬ", VW / 2, 336, "#9dd05e", 1, "center");
+    drawTextO(ctx, "ПРОБЕЛ ИЛИ ТАП - ИГРАТЬ", VW / 2, 336, "#9dd05e", 1, "center");
   }
   drawText(ctx, `M - ЗВУК: ${g.sound.muted ? "ВЫКЛ" : "ВКЛ"}`, VW / 2, 420, "rgba(170,156,138,0.7)", 1, "center");
 }
@@ -889,6 +941,7 @@ var STREET_L = 9;
 var STREET_R = W - 9;
 var RAT_Y = H - 31;
 var WALL_H = 14;
+var BTN = { x: 17, y: H / 2, r: 14 };
 var RAT_SPEED = 99;
 var SNEEZE_CD = 1.2;
 var SNEEZE_RANGE = 48;
@@ -928,6 +981,8 @@ class Game2 {
   pointerX = null;
   pointerFresh = 0;
   sneezeQueued = false;
+  btnPointer = null;
+  btnPressed = 0;
   ratX = W / 2;
   ratVisible = true;
   sneezeCd = 0;
@@ -1004,6 +1059,7 @@ class Game2 {
   }
   attachInput() {
     const kd = (e) => {
+      this.sound.unlock();
       if (e.code === "ArrowLeft" || e.code === "KeyA") {
         this.keyLeft = true;
         e.preventDefault();
@@ -1012,14 +1068,14 @@ class Game2 {
         e.preventDefault();
       } else if (e.code === "Space" || e.code === "Enter") {
         e.preventDefault();
-        if (this.phase === "play")
-          this.sneezeQueued = true;
-        else if (this.phase === "menu")
+        if (this.phase === "menu")
           this.start();
         else if (this.phase === "dead" && this.deadT > 0.7)
           this.start();
         else if (this.phase === "pause")
           this.togglePause();
+        else if (this.phase === "play")
+          this.sneezeQueued = true;
       } else if (e.code === "KeyP" || e.code === "Escape") {
         if (this.phase === "play" || this.phase === "pause")
           this.togglePause();
@@ -1037,37 +1093,70 @@ class Game2 {
       const r = this.canvas.getBoundingClientRect();
       return clamp((clientX - r.left) / r.width * W, 0, W);
     };
+    const toGameY = (clientY) => {
+      const r = this.canvas.getBoundingClientRect();
+      return (clientY - r.top) / r.height * H;
+    };
+    const inBtn = (clientX, clientY) => Math.hypot(toGameX(clientX) - BTN.x, toGameY(clientY) - BTN.y) <= BTN.r + 7;
     const pm = (e) => {
+      if (e.pointerId === this.btnPointer)
+        return;
       this.pointerX = toGameX(e.clientX);
       this.pointerFresh = 1.6;
     };
     const pd = (e) => {
       e.preventDefault();
+      this.sound.unlock();
+      if (this.phase === "play") {
+        if (inBtn(e.clientX, e.clientY)) {
+          this.btnPointer = e.pointerId;
+          this.btnPressed = 0.16;
+          this.sneezeQueued = true;
+        } else {
+          this.pointerX = toGameX(e.clientX);
+          this.pointerFresh = 1.6;
+        }
+        return;
+      }
       this.pointerX = toGameX(e.clientX);
       this.pointerFresh = 1.6;
-      if (this.phase === "play")
-        this.sneezeQueued = true;
-      else if (this.phase === "menu")
+      if (this.phase === "menu")
         this.start();
       else if (this.phase === "dead" && this.deadT > 0.7)
         this.start();
       else if (this.phase === "pause")
         this.togglePause();
     };
+    const pu = (e) => {
+      this.sound.unlock();
+      if (e.pointerId === this.btnPointer)
+        this.btnPointer = null;
+    };
+    const te = () => {
+      this.sound.unlock();
+    };
     const vis = () => {
       if (document.hidden && this.phase === "play")
         this.togglePause();
+      else if (!document.hidden)
+        this.sound.ensure();
     };
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
     this.canvas.addEventListener("pointermove", pm);
     this.canvas.addEventListener("pointerdown", pd);
+    window.addEventListener("pointerup", pu);
+    window.addEventListener("pointercancel", pu);
+    window.addEventListener("touchend", te, { passive: true });
     document.addEventListener("visibilitychange", vis);
     this.cleanups.push(() => {
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
       this.canvas.removeEventListener("pointermove", pm);
       this.canvas.removeEventListener("pointerdown", pd);
+      window.removeEventListener("pointerup", pu);
+      window.removeEventListener("pointercancel", pu);
+      window.removeEventListener("touchend", te);
       document.removeEventListener("visibilitychange", vis);
     });
   }
@@ -1114,6 +1203,8 @@ class Game2 {
     this.ratVisible = true;
     this.sneezeCd = 0.4;
     this.sneezeAnim = 0;
+    this.btnPointer = null;
+    this.btnPressed = 0;
     this.personT = 0.5;
     this.doctorT = 12;
     this.torchAcc = 30;
@@ -1219,6 +1310,7 @@ class Game2 {
     this.ratX = clamp(this.ratX, STREET_L + 9, STREET_R - 9);
     this.sneezeCd = Math.max(0, this.sneezeCd - dt);
     this.sneezeAnim = Math.max(0, this.sneezeAnim - dt);
+    this.btnPressed = Math.max(0, this.btnPressed - dt);
     if (this.sneezeQueued) {
       this.sneezeQueued = false;
       if (this.sneezeCd <= 0)
